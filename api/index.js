@@ -1,16 +1,29 @@
-require('dotenv').config(); // Forces Vercel to safely inject your OpenAI & ElevenLabs keys
+require('dotenv').config();
 const express = require('express');
 const OpenAI = require('openai');
-const { ElevenLabsClient } = require('elevenlabs');
+// Import using standard fallback to catch any version variance in their SDK package
+const ElevenLabsSDK = require('elevenlabs');
+const ElevenLabsClient = ElevenLabsSDK.ElevenLabsClient || ElevenLabsSDK.default?.ElevenLabsClient;
 
 const app = express();
 app.use(express.json());
 
-// Initialize AI clients safely using your encrypted cloud credentials
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const elevenlabs = new ElevenLabsClient({ apiKey: process.env.ELEVENLABS_API_KEY });
+// Initialize AI clients with explicit error catching so it won't crash the server container if keys are missing
+let openai;
+let elevenlabs;
 
-// Responsive user interface layout loaded directly into the web view browser tab
+try {
+    openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || 'missing' });
+    if (typeof ElevenLabsClient === 'function') {
+        elevenlabs = new ElevenLabsClient({ apiKey: process.env.ELEVENLABS_API_KEY || 'missing' });
+    } else {
+        console.error("ElevenLabsClient constructor not found in package.");
+    }
+} catch (e) {
+    console.error("Initialization error:", e.message);
+}
+
+// User interface layout
 const htmlContent = `
 <!DOCTYPE html>
 <html lang="en">
@@ -30,7 +43,7 @@ const htmlContent = `
         .line-card { background: #f8f9fa; border-left: 4px solid #0076ff; padding: 15px; margin-bottom: 12px; border-radius: 0 6px 6px 0; }
         .character { font-weight: bold; color: #0076ff; text-transform: uppercase; font-size: 14px; margin-bottom: 4px; }
         .direction { font-style: italic; color: #666; font-size: 13px; margin-bottom: 6px; }
-        .play-btn { background: #28a745; width: auto; font-size: 14px; padding: 6px 12px; margin-top: 8px; }
+        .play-btn { background: #28a745; width: auto; font-size: 14px; padding: 6px 12px; margin-top: 8px; color: white; border: none; border-radius: 4px; cursor: pointer; }
         .play-btn:hover { background: #218838; }
         .status { margin-top: 10px; color: #666; font-size: 14px; text-align: center; font-weight: 500; }
     </style>
@@ -83,7 +96,7 @@ const htmlContent = `
                     <div class="character">\${item.character}</div>
                     <div class="direction">Emotion Context: "\${item.emotion}"</div>
                     <div>"\${item.text}"</div>
-                    <button class="play-btn" onclick="playLine(this, '\${encodeURIComponent(item.text)}', '\thise.\${encodeURIComponent(item.emotion)}')">🔊 Speak Line</button>
+                    <button class="play-btn" onclick="playLine(this, '\${encodeURIComponent(item.text)}', '\${encodeURIComponent(item.emotion)}')">🔊 Speak Line</button>
                 \`;
                 container.appendChild(card);
             });
@@ -113,7 +126,10 @@ const htmlContent = `
                 })
             });
 
-            if (!response.ok) throw new Error("Voice generation failed");
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || "Voice generation failed");
+            }
 
             const blob = await response.blob();
             const audioUrl = URL.createObjectURL(blob);
@@ -143,6 +159,10 @@ app.get('/', (req, res) => {
 // Endpoint 1: Structured Text Context Extraction Router
 app.post('/api/parse', async (req, res) => {
     try {
+        if (!openai || process.env.OPENAI_API_KEY === 'missing') {
+            return res.status(500).json({ error: "OpenAI API key is missing or not configured in Vercel environment variables." });
+        }
+        
         const { script } = req.body;
         if (!script) {
             return res.status(400).json({ error: "Missing script payload context data" });
@@ -170,12 +190,18 @@ app.post('/api/parse', async (req, res) => {
 // Endpoint 2: Expressive Vocal Performance Router
 app.post('/api/speak', async (req, res) => {
     try {
+        if (!elevenlabs) {
+            return res.status(500).json({ error: "ElevenLabs client failed to initialize or package import style mismatch." });
+        }
+        if (process.env.ELEVENLABS_API_KEY === 'missing') {
+            return res.status(500).json({ error: "ElevenLabs API key is missing from Vercel environment variables." });
+        }
+
         const { text, emotion } = req.body;
         if (!text) {
             return res.status(400).json({ error: "Text field content required for speech" });
         }
 
-        // Standard dynamic voice target clone from default library
         const PRESET_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"; 
 
         const audioStream = await elevenlabs.generate({
